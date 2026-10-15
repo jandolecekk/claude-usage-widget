@@ -1,0 +1,5 @@
+# build output (./build.sh)
+ClaudeUsage.app/
+ClaudeUsageWidget
+*.bak*
+.DS_Store
