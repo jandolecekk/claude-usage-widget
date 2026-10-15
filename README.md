@@ -1,28 +1,63 @@
 # Claude usage widget
 
-Ikona v horní liště (menu bar) s % session limitu a počtem pracujících session; klik otevře Liquid Glass panel. Volitelně `--desktop` = plovoucí karta na ploše (SwiftUI `.glassEffect`). `--dump` vypíše data do terminálu.
+A small macOS menu bar app that shows how much of your Claude plan you have used, what your Claude Code sessions are doing, and how your Mac's memory is holding up.
 
-- **Limity plánu** (session 5 h, týden, týden pro jednotlivé modely) z `api.anthropic.com/api/oauth/usage` – nedokumentovaný endpoint, který používá `/usage` v Claude Code. Token se čte z Keychainu (`Claude Code-credentials`) přes `/usr/bin/security`; widget ho nikdy neobnovuje sám.
-- **Claude Code dnes / 7 dní** z lokálních logů `~/.claude/projects/**/*.jsonl` (tokeny vč. cache, odpovědi, sessions).
-- Obnova každých 5 min, ručně šipkou nebo pravým klikem. Tažením se přesouvá, pozice se pamatuje.
+The menu bar icon shows the current 5-hour session limit in % and the number of Claude Code sessions that are working right now. Click it to open a Liquid Glass panel with the details.
 
-Build: `./build.sh` → `ClaudeUsage.app` (ad-hoc podepsaný bundle, nutný kvůli notifikacím). Spuštění: `open ClaudeUsage.app`.
-Spuštění po přihlášení: `cp com.jandolecek.claude-usage-widget.plist ~/Library/LaunchAgents/ && launchctl load ~/Library/LaunchAgents/com.jandolecek.claude-usage-widget.plist`
-Ukončení: ikona ⏻ v panelu (desktop režim: pravý klik → Ukončit widget).
+The UI is in Czech by default. Switch to English with the **EN** button in the panel header (or right-click → *Switch to English*). The choice is remembered.
 
-Sessions: `~/.claude/sessions/<pid>.json` (živé PID), subagenti `~/.claude/projects/<cwd>/<session>/subagents/*.jsonl` + `.meta.json`. Pozn.: `@State` nejde bez Xcode (chybí macro plugin) → UI stav drží `UsageStore`.
+Requires macOS 26 (Tahoe) and the Swift toolchain from the Xcode Command Line Tools. Full Xcode is not needed.
 
-## Notifikace a doporučení
-- Limit session/týden ≥ 80 % a ≥ 95 % (jednou za reset okno).
-- Session přešla z „pracuje / běží příkaz“ na „čeká“.
-- Kontext session ≥ 80 % a ≥ 90 % (jednou za session).
-- Doporučení v panelu: tempo vs. session limit, týden ≥ 70 %, kontext ≥ 70 %, vychladlá cache (idle > TTL a kontext ≥ 150k).
-- Kontextové okno: v logu není, předpoklad 1M pro 5.x Opus/Fable/Sonnet (auto-compact pozorován na 976k), 200k Haiku – `contextLimit(for:)`.
-- Cache TTL podle `usage.cache_creation.ephemeral_1h_input_tokens` (1 h, jinak 5 min).
-- Zvonek v panelu notifikace vypne/zapne.
+## What it shows
 
-## Paměť (RAM)
-- Sekce „Mac · paměť“ v panelu + malá skleněná karta na ploše (přepínač v panelu / pravý klik → Skrýt).
-- Součty jako Monitor aktivity: aplikace = internal − purgeable, pevná = wired, komprese = compressor pages; swap z `vm.swapusage`; tlak z `kern.memorystatus_vm_pressure_level` (1/2/4).
-- Procesy: `ri_phys_footprint` (= sloupec Paměť), seskupené podle nejvyšší `.app`; Claude Code = `claude` + všechny jeho podprocesy (MCP, shelly, dev servery). Root procesy (CrowdStrike, JumpCloud…) číst nejdou.
-- Notifikace při kritickém tlaku (max 1×/h), doporučení při zvýšeném (vč. RAM nečinných session).
+- **Plan limits**: the 5-hour session, the weekly limit and per-model weekly limits, with reset times and a forecast of when you hit the session limit at your current pace.
+- **Claude Code today and over 7 days**: tokens (including cache), output tokens, replies and sessions, plus a 7-day sparkline.
+- **Open sessions**: status (working / running a command / waiting), uptime, tokens, RAM, context window fill, cache state, and subagents with their duration, tokens and tool calls.
+- **Tips**: pace against the session limit, weekly limit ≥ 70 %, context ≥ 70 %, cold cache (idle longer than the cache TTL with a context of 150k+), memory pressure.
+- **Mac memory**: used / total, app / wired / compressed, swap, pressure, top apps. An optional small glass card for the desktop.
+
+## Where the data comes from
+
+- **Plan limits**: `api.anthropic.com/api/oauth/usage`, the undocumented endpoint that `/usage` in Claude Code uses. The OAuth token is read from the Keychain item `Claude Code-credentials` via `/usr/bin/security`. The widget never refreshes or stores the token; if it has expired, open Claude Code.
+- **Usage stats**: local Claude Code logs in `~/.claude/projects/**/*.jsonl`.
+- **Sessions**: `~/.claude/sessions/<pid>.json` (live PIDs only); subagents from `~/.claude/projects/<cwd>/<session>/subagents/*.jsonl` and `.meta.json`.
+- **Context window**: not stored in the logs. The widget assumes 1M tokens for the 5.x Opus / Fable / Sonnet models (auto-compact was observed at 976k) and 200k for Haiku; see `contextLimit(for:)`. Cache TTL is 1 h when `usage.cache_creation.ephemeral_1h_input_tokens` is present, otherwise 5 min.
+- **Memory**: totals computed the way Activity Monitor does (app = internal − purgeable, wired, compressor pages), swap from `vm.swapusage`, pressure from `kern.memorystatus_vm_pressure_level`. Per process it uses `ri_phys_footprint` (Activity Monitor's *Memory* column), grouped by the owning `.app`. Claude Code = every `claude` process plus everything it spawned (MCP servers, shells, dev servers). Root processes can't be read.
+
+Plan limits refresh every 5 minutes; sessions and memory every 10 seconds. Refresh manually with the arrow button or right-click → *Refresh*.
+
+## Notifications
+
+- Session or weekly limit at ≥ 80 % and ≥ 95 % (once per reset window).
+- A session goes from working to waiting.
+- Session context at ≥ 80 % and ≥ 90 % (once per session).
+- Critical memory pressure (at most once an hour).
+
+Turn them off with the bell in the panel header.
+
+## Build and run
+
+```sh
+./build.sh              # builds ClaudeUsage.app (ad-hoc signed; notifications need an .app bundle)
+open ClaudeUsage.app
+```
+
+Start at login:
+
+```sh
+cp com.jandolecek.claude-usage-widget.plist ~/Library/LaunchAgents/
+launchctl load ~/Library/LaunchAgents/com.jandolecek.claude-usage-widget.plist
+```
+
+Quit with the power button in the panel (desktop mode: right-click → *Quit widget*).
+
+Other modes:
+
+- `--desktop`: a floating glass card on the desktop instead of the menu bar icon. Drag to move; the position is remembered.
+- `--dump`: print what the widget sees (sessions, usage, memory) to the terminal, for debugging.
+
+## Notes
+
+- **The icon is missing from the menu bar?** On a MacBook with a notch, macOS hides status items that don't fit to the right of the notch, without any warning. The widget asks for a slot near the clock (`NSStatusItem Preferred Position ClaudeUsage` in `com.jandolecek.claude-usage`); ⌘-drag the icon to move it. If it is still hidden, make room by turning off other menu bar items (System Settings → Menu Bar) or by shortening wide ones.
+- The panel scrolls when it is taller than the screen.
+- `@State` doesn't compile without Xcode (the macro plugin is missing), so UI state lives in `UsageStore`.
