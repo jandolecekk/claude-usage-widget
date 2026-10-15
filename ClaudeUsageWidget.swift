@@ -5,12 +5,31 @@ import UserNotifications
 
 // MARK: - Data
 
+/// UI language: Czech by default, English via the CZ/EN switch in the panel (persisted).
+enum Lang {
+    static var english: Bool {
+        get { UserDefaults.standard.string(forKey: "language") == "en" }
+        set { UserDefaults.standard.set(newValue ? "en" : "cs", forKey: "language") }
+    }
+}
+
+func tr(_ cs: String, _ en: String) -> String { Lang.english ? en : cs }
+
 struct LimitItem: Identifiable {
     let id: String
-    let label: String
+    let kind: String
+    let model: String?      // per-model weekly limits
     let percent: Double
     let resetsAt: Date?
     let severity: String
+
+    var label: String {
+        switch kind {
+        case "session": return "Session (5 h)"
+        case "weekly_all": return tr("Týden – vše", "Week – all")
+        default: return tr("Týden – ", "Week – ") + (model ?? kind)
+        }
+    }
 }
 
 struct LocalStats {
@@ -178,7 +197,7 @@ struct MemStats {
     var unreadable = 0
 
     var usedFraction: Double { total > 0 ? Double(used) / Double(total) : 0 }
-    var pressureText: String { pressure >= 4 ? "kritické" : pressure >= 2 ? "zvýšené" : "normální" }
+    var pressureText: String { pressure >= 4 ? tr("kritické", "critical") : pressure >= 2 ? tr("zvýšené", "elevated") : tr("normální", "normal") }
 }
 
 enum MemScanner {
@@ -259,7 +278,7 @@ enum MemScanner {
     static func groupName(_ path: String) -> String {
         // Claude Code installs as ~/.local/share/claude/versions/<version>
         if path.contains("/claude/versions/") || (path as NSString).lastPathComponent == "claude" { return "claude" }
-        if path.hasSuffix("com.apple.Virtualization.VirtualMachine") { return "Virtuální stroj (Claude Cowork)" }
+        if path.hasSuffix("com.apple.Virtualization.VirtualMachine") { return tr("Virtuální stroj (Claude Cowork)", "Virtual machine (Claude Cowork)") }
         if let r = path.range(of: ".app/") {
             let app = String(path[..<r.lowerBound])
             return (app as NSString).lastPathComponent
@@ -368,14 +387,17 @@ final class UsageStore: ObservableObject {
                 self.scanningMem = false
                 if m.pressure >= 4, let top = m.apps.first {
                     let hour = Int(Date().timeIntervalSince1970) / 3600
-                    Notifier.shared.send(key: "mem-\(hour)", title: "Kritické zatížení paměti",
-                                         body: "Nejvíc bere \(top.id) (\(gb(top.bytes))). Swap \(gb(m.swap)).")
+                    Notifier.shared.send(key: "mem-\(hour)", title: tr("Kritické zatížení paměti", "Critical memory pressure"),
+                                         body: tr("Nejvíc bere \(top.id) (\(gb(top.bytes))). Swap \(gb(m.swap)).",
+                                                  "\(top.id) uses the most (\(gb(top.bytes))). Swap \(gb(m.swap))."))
                 }
             }
         }
     }
 
     @Published var notificationsOn = Notifier.shared.enabled { didSet { Notifier.shared.enabled = notificationsOn } }
+    // refresh() re-creates error texts in the new language
+    @Published var english = Lang.english { didSet { Lang.english = english; refresh() } }
     private var lastStatus: [String: String] = [:]
 
     func refreshSessions() {
@@ -395,14 +417,16 @@ final class UsageStore: ObservableObject {
         for s in list {
             let was = lastStatus[s.id]
             if !first, let was, was != "idle", s.status == "idle" {
-                Notifier.shared.send(title: "\(s.name) čeká na tebe",
-                                     body: "Session v \(s.folder) dokončila práci.")
+                Notifier.shared.send(title: tr("\(s.name) čeká na tebe", "\(s.name) is waiting for you"),
+                                     body: tr("Session v \(s.folder) dokončila práci.", "Session in \(s.folder) has finished."))
             }
             for t in [80.0, 90.0] where s.contextPercent >= t {
                 Notifier.shared.send(key: "ctx-\(s.id)-\(Int(t))",
-                                     title: "Kontext \(s.name): \(Int(s.contextPercent)) %",
-                                     body: t >= 90 ? "Blíží se auto-compact. Zadej /compact, nebo začni novou session."
-                                                   : "Na nový úkol je lepší nová session (nebo /compact).")
+                                     title: tr("Kontext \(s.name): \(Int(s.contextPercent)) %", "Context \(s.name): \(Int(s.contextPercent))%"),
+                                     body: t >= 90 ? tr("Blíží se auto-compact. Zadej /compact, nebo začni novou session.",
+                                                        "Auto-compact is close. Run /compact or start a new session.")
+                                                   : tr("Na nový úkol je lepší nová session (nebo /compact).",
+                                                        "A new task is better in a new session (or /compact)."))
             }
         }
         lastStatus = Dictionary(uniqueKeysWithValues: list.map { ($0.id, $0.status) })
@@ -413,8 +437,8 @@ final class UsageStore: ObservableObject {
             let stamp = Int(l.resetsAt?.timeIntervalSince1970 ?? 0) / 3600
             for t in [80.0, 95.0] where l.percent >= t {
                 Notifier.shared.send(key: "lim-\(l.id)-\(Int(t))-\(stamp)",
-                                     title: "\(l.label): \(Int(l.percent)) % limitu",
-                                     body: resetText(l.resetsAt).capitalized + ".")
+                                     title: tr("\(l.label): \(Int(l.percent)) % limitu", "\(l.label): \(Int(l.percent))% of limit"),
+                                     body: capFirst(resetText(l.resetsAt)) + ".")
             }
         }
     }
@@ -422,32 +446,41 @@ final class UsageStore: ObservableObject {
     /// Practical advice derived from limits + open sessions.
     var tips: [Tip] {
         var out: [Tip] = []
-        if let sess = limits.first(where: { $0.id.hasSuffix("session") }), let f = forecast(sess), !f.contains("vystačíš") {
-            out.append(Tip(id: "pace", icon: "speedometer", text: f + " – zvolni, nebo dej lehčí úkoly menšímu modelu.", urgent: true))
+        if let sess = limits.first(where: { $0.id.hasSuffix("session") }), let hit = limitHit(sess), hit != .distantFuture,
+           let f = forecast(sess) {
+            out.append(Tip(id: "pace", icon: "speedometer",
+                           text: f + tr(" – zvolni, nebo dej lehčí úkoly menšímu modelu.", " – slow down or give lighter tasks to a smaller model."),
+                           urgent: true))
         }
         if let w = limits.first(where: { $0.id.hasSuffix("weekly_all") }), w.percent >= 70 {
-            out.append(Tip(id: "week", icon: "calendar", text: "Týdenní limit \(Int(w.percent)) % – \(resetText(w.resetsAt)).", urgent: w.percent >= 90))
+            out.append(Tip(id: "week", icon: "calendar", text: tr("Týdenní limit \(Int(w.percent)) % – \(resetText(w.resetsAt)).",
+                                                                 "Weekly limit \(Int(w.percent))% – \(resetText(w.resetsAt))."), urgent: w.percent >= 90))
         }
         for s in sessions {
             if s.contextPercent >= 70 {
                 out.append(Tip(id: "ctx-\(s.id)", icon: "rectangle.stack.badge.minus",
-                               text: "\(s.name): kontext \(Int(s.contextPercent)) % – na nový úkol nová session, jinak /compact.",
+                               text: tr("\(s.name): kontext \(Int(s.contextPercent)) % – na nový úkol nová session, jinak /compact.",
+                                       "\(s.name): context \(Int(s.contextPercent))% – new task, new session; otherwise /compact."),
                                urgent: s.contextPercent >= 85))
             }
         }
         if mem.pressure >= 2 {
             let idleCC = sessions.filter { $0.status == "idle" && $0.idleFor > 3600 }
             let idleBytes = idleCC.reduce(UInt64(0)) { $0 + (mem.perPid[$1.pid] ?? 0) }
-            var t = "Paměť pod tlakem (\(mem.pressureText), swap \(gb(mem.swap)))."
-            if let top = mem.apps.first { t += " Nejvíc: \(top.id) \(gb(top.bytes))." }
-            if idleBytes > 300_000_000 { t += " \(idleCC.count) session nečinných přes 1 h drží \(gb(idleBytes)) – zavři je." }
+            var t = tr("Paměť pod tlakem (\(mem.pressureText), swap \(gb(mem.swap))).", "Memory under pressure (\(mem.pressureText), swap \(gb(mem.swap))).")
+            if let top = mem.apps.first { t += tr(" Nejvíc: \(top.id) \(gb(top.bytes)).", " Top: \(top.id) \(gb(top.bytes)).") }
+            if idleBytes > 300_000_000 {
+                t += tr(" \(idleCC.count) session nečinných přes 1 h drží \(gb(idleBytes)) – zavři je.",
+                        " \(idleCC.count) sessions idle for over 1 h hold \(gb(idleBytes)) – close them.")
+            }
             out.append(Tip(id: "mem", icon: "memorychip", text: t, urgent: mem.pressure >= 4))
         }
         let cold = sessions.filter { $0.contextPercent < 70 && $0.cacheExpired && $0.context.tokens >= 150_000 }
         if !cold.isEmpty {
             let names = cold.prefix(3).map(\.name).joined(separator: ", ") + (cold.count > 3 ? " +\(cold.count - 3)" : "")
             out.append(Tip(id: "cache", icon: "snowflake",
-                           text: "Vychladlá cache: \(names). Další zpráva znovu načte celý kontext (150k+). Na nové téma raději novou session.",
+                           text: tr("Vychladlá cache: \(names). Další zpráva znovu načte celý kontext (150k+). Na nové téma raději novou session.",
+                                     "Cold cache: \(names). The next message re-reads the whole context (150k+). For a new topic, start a new session."),
                            urgent: false))
         }
         return out
@@ -512,10 +545,10 @@ enum RemoteUsage {
 
     static func fetch() async -> Swift.Result<Result, WidgetError> {
         guard let c = credentials(), let token = c["accessToken"] as? String else {
-            return .failure(WidgetError(message: "Nenalezen login Claude Code"))
+            return .failure(WidgetError(message: tr("Nenalezen login Claude Code", "Claude Code login not found")))
         }
         if let exp = c["expiresAt"] as? Double, exp / 1000 < Date().timeIntervalSince1970 {
-            return .failure(WidgetError(message: "Token vypršel – otevři Claude Code"))
+            return .failure(WidgetError(message: tr("Token vypršel – otevři Claude Code", "Token expired – open Claude Code")))
         }
         var req = URLRequest(url: URL(string: "https://api.anthropic.com/api/oauth/usage")!)
         req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
@@ -533,17 +566,10 @@ enum RemoteUsage {
             let iso2 = ISO8601DateFormatter()
             let items: [LimitItem] = arr.enumerated().map { i, l in
                 let kind = l["kind"] as? String ?? "?"
-                var label: String
-                switch kind {
-                case "session": label = "Session (5 h)"
-                case "weekly_all": label = "Týden – vše"
-                default:
-                    let scope = l["scope"] as? [String: Any]
-                    let model = (scope?["model"] as? [String: Any])?["display_name"] as? String
-                    label = "Týden – " + (model ?? kind)
-                }
+                let scope = l["scope"] as? [String: Any]
+                let model = (scope?["model"] as? [String: Any])?["display_name"] as? String
                 let r = l["resets_at"] as? String ?? ""
-                return LimitItem(id: "\(i)-\(kind)", label: label,
+                return LimitItem(id: "\(i)-\(kind)", kind: kind, model: model,
                                  percent: (l["percent"] as? NSNumber)?.doubleValue ?? 0,
                                  resetsAt: iso.date(from: r) ?? iso2.date(from: r),
                                  severity: l["severity"] as? String ?? "normal")
@@ -615,14 +641,17 @@ func compact(_ n: Int) -> String {
 func resetText(_ d: Date?) -> String {
     guard let d else { return "" }
     let secs = Int(d.timeIntervalSinceNow)
-    if secs <= 0 { return "reset teď" }
+    if secs <= 0 { return tr("reset teď", "resets now") }
     if secs < 86400 {
         let h = secs / 3600, m = (secs % 3600) / 60
-        return h > 0 ? "reset za \(h) h \(m) min" : "reset za \(m) min"
+        let left = h > 0 ? "\(h) h \(m) min" : "\(m) min"
+        return tr("reset za ", "resets in ") + left
     }
-    let f = DateFormatter(); f.locale = Locale(identifier: "cs_CZ"); f.dateFormat = "EEE H:mm"
-    return "reset " + f.string(from: d)
+    let f = DateFormatter(); f.locale = Locale(identifier: Lang.english ? "en_US" : "cs_CZ"); f.dateFormat = "EEE H:mm"
+    return tr("reset ", "resets ") + f.string(from: d)
 }
+
+func capFirst(_ s: String) -> String { s.prefix(1).uppercased() + s.dropFirst() }
 
 func duration(_ secs: TimeInterval) -> String {
     let t = Int(max(0, secs))
@@ -632,14 +661,20 @@ func duration(_ secs: TimeInterval) -> String {
     return "\(t / 86400) d \((t % 86400) / 3600) h"
 }
 
-/// Linear burn-rate forecast for the 5-hour session window.
-func forecast(_ item: LimitItem) -> String? {
+/// Linear burn-rate forecast for the 5-hour session window: when the limit runs out at the current pace
+/// (.distantFuture = lasts until the reset, nil = not enough data yet).
+func limitHit(_ item: LimitItem) -> Date? {
     guard let reset = item.resetsAt, item.percent >= 1 else { return nil }
     let elapsed = Date().timeIntervalSince(reset.addingTimeInterval(-5 * 3600))
     guard elapsed > 600 else { return nil }
     let hitAt = Date().addingTimeInterval((100 - item.percent) / (item.percent / elapsed))
-    if hitAt >= reset { return "Tímto tempem vystačíš do resetu" }
-    return "Tímto tempem limit v " + hitAt.formatted(date: .omitted, time: .shortened)
+    return hitAt >= reset ? .distantFuture : hitAt
+}
+
+func forecast(_ item: LimitItem) -> String? {
+    guard let hit = limitHit(item) else { return nil }
+    if hit == .distantFuture { return tr("Tímto tempem vystačíš do resetu", "At this pace you'll last until the reset") }
+    return tr("Tímto tempem limit v ", "At this pace you'll hit the limit at ") + hit.formatted(date: .omitted, time: .shortened)
 }
 
 func usageColor(_ p: Double) -> Color {
@@ -750,7 +785,7 @@ struct SubagentRow: View {
                     Text(duration((a.running ? Date() : (a.end ?? st)).timeIntervalSince(st)))
                         .font(.system(size: 10.5, weight: .semibold, design: .rounded))
                 }
-                Text("\(compact(a.tokens)) tok · \(a.toolCalls) nástr.").font(.system(size: 9.5)).opacity(0.5)
+                Text(tr("\(compact(a.tokens)) tok · \(a.toolCalls) nástr.", "\(compact(a.tokens)) tok · \(a.toolCalls) tools")).font(.system(size: 9.5)).opacity(0.5)
             }
         }
     }
@@ -774,10 +809,10 @@ struct ContextBar: View {
                 .font(.system(size: 9.5, design: .rounded)).opacity(0.6)
             if s.cacheExpired {
                 Image(systemName: "snowflake").font(.system(size: 8.5)).opacity(0.5)
-                    .help("Cache vypršela – další zpráva znovu načte celý kontext")
+                    .help(tr("Cache vypršela – další zpráva znovu načte celý kontext", "Cache expired – the next message re-reads the whole context"))
             }
         }
-        .help("Kontext \(Int(s.contextPercent)) % · \(s.context.model) · cache TTL \(Int(s.context.cacheTTL / 60)) min")
+        .help(tr("Kontext \(Int(s.contextPercent)) %", "Context \(Int(s.contextPercent))%") + " · \(s.context.model) · cache TTL \(Int(s.context.cacheTTL / 60)) min")
     }
 }
 
@@ -817,9 +852,9 @@ struct MemorySection: View {
         VStack(alignment: .leading, spacing: 10) {
             Button { withAnimation(.snappy) { store.memOpen.toggle() } } label: {
                 HStack(spacing: 6) {
-                    Text("MAC · PAMĚŤ").font(.system(size: 9.5, weight: .semibold)).kerning(0.8).opacity(0.55)
+                    Text(tr("MAC · PAMĚŤ", "MAC · MEMORY")).font(.system(size: 9.5, weight: .semibold)).kerning(0.8).opacity(0.55)
                     Circle().fill(pressureColor).frame(width: 7, height: 7)
-                    Text("tlak \(m.pressureText)").font(.system(size: 10.5)).foregroundStyle(pressureColor)
+                    Text(tr("tlak ", "pressure ") + m.pressureText).font(.system(size: 10.5)).foregroundStyle(pressureColor)
                     Spacer()
                     Text("\(gb(m.used)) / \(gb(m.total))").font(.system(size: 10.5, weight: .semibold, design: .rounded))
                     Image(systemName: "chevron.right").font(.system(size: 9, weight: .bold)).opacity(0.4)
@@ -841,9 +876,9 @@ struct MemorySection: View {
             }.frame(height: 6)
 
             HStack(spacing: 10) {
-                legend(Color(red: 0.4, green: 0.7, blue: 1), "aplikace", m.app)
-                legend(Color(red: 0.75, green: 0.55, blue: 1), "pevná", m.wired)
-                legend(Color(red: 1, green: 0.72, blue: 0.3), "komprese", m.compressed)
+                legend(Color(red: 0.4, green: 0.7, blue: 1), tr("aplikace", "app"), m.app)
+                legend(Color(red: 0.75, green: 0.55, blue: 1), tr("pevná", "wired"), m.wired)
+                legend(Color(red: 1, green: 0.72, blue: 0.3), tr("komprese", "compressed"), m.compressed)
                 Spacer(minLength: 0)
                 Text("swap \(gb(m.swap))").font(.system(size: 9.5)).foregroundStyle(m.swap > 4_000_000_000 ? Color.orange : Color.primary.opacity(0.6))
             }
@@ -864,14 +899,14 @@ struct MemorySection: View {
                     }
                 }
                 HStack {
-                    Text(m.unreadable > 0 ? "\(m.unreadable) systémových procesů (root) nelze přečíst" : "").font(.system(size: 9)).opacity(0.4)
+                    Text(m.unreadable > 0 ? tr("\(m.unreadable) systémových procesů (root) nelze přečíst", "\(m.unreadable) system processes (root) can't be read") : "").font(.system(size: 9)).opacity(0.4)
                     Spacer()
-                    Button("Monitor aktivity") {
+                    Button(tr("Monitor aktivity", "Activity Monitor")) {
                         NSWorkspace.shared.open(URL(fileURLWithPath: "/System/Applications/Utilities/Activity Monitor.app"))
                     }.buttonStyle(.plain).font(.system(size: 9.5)).foregroundStyle(usageColor(0))
                 }
             }
-            Toggle("Widget paměti na ploše", isOn: $store.memDesktop)
+            Toggle(tr("Widget paměti na ploše", "Memory widget on desktop"), isOn: $store.memDesktop)
                 .toggleStyle(.switch).controlSize(.mini).font(.system(size: 10.5))
         }
     }
@@ -893,7 +928,7 @@ struct MemoryWidget: View {
         VStack(alignment: .leading, spacing: 9) {
             HStack(spacing: 6) {
                 Image(systemName: "memorychip").font(.system(size: 12, weight: .semibold)).foregroundStyle(pc)
-                Text("Paměť").font(.system(size: 13, weight: .bold))
+                Text(tr("Paměť", "Memory")).font(.system(size: 13, weight: .bold))
                 Spacer()
                 Text(m.pressureText).font(.system(size: 10, weight: .semibold))
                     .padding(.horizontal, 7).padding(.vertical, 2)
@@ -928,8 +963,8 @@ struct MemoryWidget: View {
         .glassEffect(.regular, in: RoundedRectangle(cornerRadius: 24, style: .continuous))
         .padding(10)
         .contextMenu {
-            Button("Skrýt widget paměti") { store.memDesktop = false }
-            Button("Monitor aktivity") {
+            Button(tr("Skrýt widget paměti", "Hide memory widget")) { store.memDesktop = false }
+            Button(tr("Monitor aktivity", "Activity Monitor")) {
                 NSWorkspace.shared.open(URL(fileURLWithPath: "/System/Applications/Utilities/Activity Monitor.app"))
             }
         }
@@ -940,7 +975,7 @@ struct TipsSection: View {
     let tips: [Tip]
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text("DOPORUČENÍ").font(.system(size: 9.5, weight: .semibold)).kerning(0.8).opacity(0.55)
+            Text(tr("DOPORUČENÍ", "TIPS")).font(.system(size: 9.5, weight: .semibold)).kerning(0.8).opacity(0.55)
             ForEach(tips) { t in
                 HStack(alignment: .top, spacing: 8) {
                     Image(systemName: t.icon).font(.system(size: 11))
@@ -962,9 +997,9 @@ struct SessionRow: View {
 
     var statusText: String {
         switch s.status {
-        case "busy": return "pracuje"
-        case "shell": return "běží příkaz"
-        case "idle": return "čeká · " + duration(Date().timeIntervalSince(s.updatedAt))
+        case "busy": return tr("pracuje", "working")
+        case "shell": return tr("běží příkaz", "running a command")
+        case "idle": return tr("čeká · ", "waiting · ") + duration(Date().timeIntervalSince(s.updatedAt))
         default: return s.status
         }
     }
@@ -1011,15 +1046,15 @@ struct SessionRow: View {
             if open {
                 VStack(alignment: .leading, spacing: 7) {
                     if s.subagents.isEmpty {
-                        Text("Žádní subagenti").font(.system(size: 10.5)).opacity(0.5)
+                        Text(tr("Žádní subagenti", "No subagents")).font(.system(size: 10.5)).opacity(0.5)
                     } else {
                         ForEach(s.subagents.prefix(8)) { SubagentRow(a: $0) }
                         if s.subagents.count > 8 {
-                            Text("+ \(s.subagents.count - 8) dalších").font(.system(size: 9.5)).opacity(0.45)
+                            Text(tr("+ \(s.subagents.count - 8) dalších", "+ \(s.subagents.count - 8) more")).font(.system(size: 9.5)).opacity(0.45)
                         }
                     }
                     HStack(spacing: 12) {
-                        Button("Otevřít složku") { NSWorkspace.shared.open(URL(fileURLWithPath: s.cwd)) }
+                        Button(tr("Otevřít složku", "Open folder")) { NSWorkspace.shared.open(URL(fileURLWithPath: s.cwd)) }
                         Text("PID \(s.pid)").opacity(0.45)
                     }
                     .font(.system(size: 9.5)).buttonStyle(.plain).foregroundStyle(usageColor(0))
@@ -1040,9 +1075,9 @@ struct SessionsSection: View {
             Button { withAnimation(.snappy) { store.sessionsOpen.toggle() } } label: {
                 HStack {
                     Text("SESSIONS").font(.system(size: 9.5, weight: .semibold)).kerning(0.8).opacity(0.55)
-                    Text("\(store.sessions.count) otevřených · \(busy) aktivních").font(.system(size: 10.5)).opacity(0.75)
+                    Text(tr("\(store.sessions.count) otevřených · \(busy) aktivních", "\(store.sessions.count) open · \(busy) active")).font(.system(size: 10.5)).opacity(0.75)
                     if let top = store.sessions.map(\.contextPercent).max(), top >= 1 {
-                        Text("· max kontext \(Int(top)) %").font(.system(size: 10.5))
+                        Text(tr("· max kontext \(Int(top)) %", "· max context \(Int(top))%")).font(.system(size: 10.5))
                             .foregroundStyle(top >= 85 ? Color.red : top >= 70 ? Color.orange : Color.primary.opacity(0.75))
                     }
                     Spacer()
@@ -1107,19 +1142,22 @@ struct WidgetView: View {
                 Spacer()
                 Button { store.refresh() } label: {
                     Image(systemName: "arrow.clockwise").font(.system(size: 11, weight: .semibold))
-                }.buttonStyle(.plain).opacity(0.6).help("Obnovit")
+                }.buttonStyle(.plain).opacity(0.6).help(tr("Obnovit", "Refresh"))
                 Button { store.notificationsOn.toggle() } label: {
                     Image(systemName: store.notificationsOn ? "bell.fill" : "bell.slash").font(.system(size: 11, weight: .semibold))
-                }.buttonStyle(.plain).opacity(0.6).help(store.notificationsOn ? "Notifikace zapnuté" : "Notifikace vypnuté")
+                }.buttonStyle(.plain).opacity(0.6).help(store.notificationsOn ? tr("Notifikace zapnuté", "Notifications on") : tr("Notifikace vypnuté", "Notifications off"))
+                Button { store.english.toggle() } label: {
+                    Text(store.english ? "CZ" : "EN").font(.system(size: 9.5, weight: .bold))
+                }.buttonStyle(.plain).opacity(0.6).help(tr("Switch to English", "Přepnout do češtiny"))
                 if popover {
                     Button { NSApp.terminate(nil) } label: {
                         Image(systemName: "power").font(.system(size: 11, weight: .semibold))
-                    }.buttonStyle(.plain).opacity(0.6).help("Ukončit")
+                    }.buttonStyle(.plain).opacity(0.6).help(tr("Ukončit", "Quit"))
                 }
             }
 
             if rings.isEmpty {
-                Text(store.error ?? "Načítám…").font(.system(size: 12)).opacity(0.7)
+                Text(store.error ?? tr("Načítám…", "Loading…")).font(.system(size: 12)).opacity(0.7)
                     .frame(maxWidth: .infinity, minHeight: 120)
             } else {
                 HStack(spacing: 8) { ForEach(rings) { Ring(item: $0) } }
@@ -1136,18 +1174,18 @@ struct WidgetView: View {
             Divider().overlay(Color.primary.opacity(0.2))
 
             VStack(alignment: .leading, spacing: 10) {
-                Text("CLAUDE CODE · DNES").font(.system(size: 9.5, weight: .semibold)).kerning(0.8).opacity(0.55)
+                Text(tr("CLAUDE CODE · DNES", "CLAUDE CODE · TODAY")).font(.system(size: 9.5, weight: .semibold)).kerning(0.8).opacity(0.55)
                 HStack {
-                    Stat(value: compact(store.local.todayTokens), label: "tokenů")
+                    Stat(value: compact(store.local.todayTokens), label: tr("tokenů", "tokens"))
                     Stat(value: compact(store.local.todayOutput), label: "output")
-                    Stat(value: "\(store.local.todayMessages)", label: "odpovědí")
+                    Stat(value: "\(store.local.todayMessages)", label: tr("odpovědí", "replies"))
                     Stat(value: "\(store.local.todaySessions)", label: "sessions")
                 }
                 HStack(alignment: .bottom, spacing: 12) {
                     Sparkline(values: store.local.daily)
                     VStack(alignment: .trailing, spacing: 1) {
                         Text(compact(store.local.weekTokens)).font(.system(size: 13, weight: .semibold, design: .rounded))
-                        Text("7 dní").font(.system(size: 10)).opacity(0.6)
+                        Text(tr("7 dní", "7 days")).font(.system(size: 10)).opacity(0.6)
                     }
                 }
             }
@@ -1167,7 +1205,7 @@ struct WidgetView: View {
                 if let e = store.error, !rings.isEmpty {
                     Label(e, systemImage: "exclamationmark.triangle.fill").font(.system(size: 10))
                 } else if let u = store.updated {
-                    Text("aktualizováno " + u.formatted(date: .omitted, time: .shortened)).font(.system(size: 10))
+                    Text(tr("aktualizováno ", "updated ") + u.formatted(date: .omitted, time: .shortened)).font(.system(size: 10))
                 }
             }.opacity(0.5)
         }
@@ -1176,9 +1214,10 @@ struct WidgetView: View {
         .frame(width: 320)
         .modifier(CardBackground(popover: popover))
         .contextMenu {
-            Button("Obnovit") { store.refresh() }
+            Button(tr("Obnovit", "Refresh")) { store.refresh() }
+            Button(tr("Switch to English", "Přepnout do češtiny")) { store.english.toggle() }
             Divider()
-            Button("Ukončit widget") { NSApp.terminate(nil) }
+            Button(tr("Ukončit widget", "Quit widget")) { NSApp.terminate(nil) }
         }
     }
 }
