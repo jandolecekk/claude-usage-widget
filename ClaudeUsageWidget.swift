@@ -351,6 +351,7 @@ final class UsageStore: ObservableObject {
     @Published var mem = MemStats()
     @Published var memHistory: [Double] = []   // used fraction, one sample per 10 s
     @Published var memOpen = false
+    @Published var panelHeight: CGFloat = 600   // measured popover content height (scrolls past the screen)
     @Published var memDesktop = UserDefaults.standard.object(forKey: "memDesktop") as? Bool ?? true {
         didSet { UserDefaults.standard.set(memDesktop, forKey: "memDesktop") }
     }
@@ -1073,7 +1074,24 @@ struct WidgetView: View {
     @ObservedObject var store: UsageStore
     var popover = false
 
+    /// The popover never grows past the screen: taller content scrolls. The measured height lives
+    /// in the store because @State needs the macro plugin (Xcode).
     var body: some View {
+        if popover {
+            let maxH = (NSScreen.main?.visibleFrame.height ?? 800) - 40
+            ScrollView(.vertical) {
+                panel.onGeometryChange(for: CGFloat.self) { $0.size.height } action: { h in
+                    if abs(store.panelHeight - h) > 0.5 { store.panelHeight = h }
+                }
+            }
+            .scrollIndicators(.automatic)
+            .frame(width: 320, height: min(store.panelHeight, maxH))
+        } else {
+            panel
+        }
+    }
+
+    @ViewBuilder var panel: some View {
         let rings = store.limits.filter { $0.id.hasSuffix("session") || $0.id.hasSuffix("weekly_all") }
         let bars = store.limits.filter { !rings.map(\.id).contains($0.id) }
 
