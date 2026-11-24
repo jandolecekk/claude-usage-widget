@@ -42,10 +42,10 @@ Turn them off with the bell in the panel header.
 open ClaudeUsage.app
 ```
 
-Start at login:
+Start at login (run from this folder; `sed` fills in where the app lives):
 
 ```sh
-cp com.jandolecek.claude-usage-widget.plist ~/Library/LaunchAgents/
+sed "s|__APP_DIR__|$PWD|" com.jandolecek.claude-usage-widget.plist > ~/Library/LaunchAgents/com.jandolecek.claude-usage-widget.plist
 launchctl load ~/Library/LaunchAgents/com.jandolecek.claude-usage-widget.plist
 ```
 
@@ -61,3 +61,7 @@ Other modes:
 - **The icon is missing from the menu bar?** On a MacBook with a notch, macOS hides status items that don't fit to the right of the notch, without any warning. The widget asks for a slot near the clock (`NSStatusItem Preferred Position ClaudeUsage` in `com.jandolecek.claude-usage`); ⌘-drag the icon to move it. If it is still hidden, make room by turning off other menu bar items (System Settings → Menu Bar) or by shortening wide ones.
 - The panel scrolls when it is taller than the screen.
 - `@State` doesn't compile without Xcode (the macro plugin is missing), so UI state lives in `UsageStore`.
+
+## License
+
+[MIT](LICENSE)
